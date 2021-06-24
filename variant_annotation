@@ -1,0 +1,148 @@
+#Set / initialise up the R environment----
+
+#Load packages into R
+library(tidyverse)
+library(plyr)
+
+#Variant annotation and prioritisation----
+
+#Set environment variables
+import os
+os.environ["inprefix"] = "NIHRBR-RD_BMPR2"
+
+#Check environment variable is present in R
+Sys.getenv("inprefix")
+
+#Check environment variable is present in bash 
+! echo $inprefix
+
+#Print header of vcf file in bash 
+bcftools view -h data/$inprefix.vcf.gz | grep "^##"
+
+#Extract information and write it into a text file - CHRO, POS, ID, REF, ALT, INFO, AF_UWGS13K, GNOMAD_AF, EXAC_AF, TOPMED_AF, UK10KWGS_AF, UK10KWES_AF, 1000G_AF, PhyloP_UCSC, phastCons_UCSC, GERP_UCSC).
+bcftools query \
+    -f '%CHROM\t%POS\t%ID\t%REF\t%ALT\t%INFO/AF_WGS13K\t%INFO/AF_UWGS13K\t%INFO/GNOMAD_AF\t%INFO/EXAC_AF\t%INFO/TOPMED_AF\t%INFO/UK10KWGS_AF\t%INFO/UK10KWES_AF\t%INFO/1000G_AF\t%INFO/PhyloP_UCSC\t%INFO/phastCons_UCSC\t%INFO/GERP_UCSC\t%INFO/AF_PAH\t%INFO/AF_UPAH\t%INFO/AF_CTRLS\t%INFO/AF_UCTRLS\t%INFO/AC_PAH\t%INFO/AC_UPAH\t%INFO/AC_CTRLS\t%INFO/AC_UCTRLS\n' \
+    data/$inprefix.vcf.gz > $inprefix.txt
+
+#Read file into R
+vars = read_tsv(paste0(Sys.getenv("inprefix"),".txt"),
+                  col_names=c("CHROM", "POS", "ID", "REF", "ALT",
+                              "AF_WGS13K", "AF_UWGS13K",
+                              "GNOMAD_AF", "EXAC_AF", "TOPMED_AF",
+                              "UK10KWGS_AF","UK10KWES_AF", "1000G_AF",
+                              "PhyloP_UCSC", "phastCons_UCSC", "GERP_UCSC",
+                              "AF_PAH", "AF_UPAH", "AF_CTRLS", "AF_UCTRLS",
+                              "AC_PAH", "AC_UPAH", "AC_CTRLS", "AC_UCTRLS"))
+head(vars)
+
+#Look at the structure of the data frame
+str(vars)
+
+#Check the dimension of the data frame
+dim(vars)
+
+#Select only variants that are appearing less frequent than 1 in 10,000 in the maximum unrelated subset (UWGS13K) of the NIHR BioResource - Rare Diseases project and are highly conserved
+vars.flt = filter(vars, AF_UWGS13K<0.0001 & as.numeric(GERP_UCSC)>4)
+
+#Show the first 10 lines of the new data frame
+head(vars.flt)
+
+#Check the dimension of the new data frame 
+dim(vars.flt)
+
+#Select variants less frequent than 1 in 1,000 in the maximum unrelated set (UWGS13K) of the NIHR BioResource - Rare Diseases project. 
+outprefix=${inprefix}_UWGS13K_1e-03_nogt
+bcftools view -i 'INFO/AF_UWGS13K < 0.001' --drop-genotypes -Oz -o $outprefix.vcf.gz data/$inprefix.vcf.gz  #Drop genotypes to make downstream analysis faster
+tabix -p vcf -C $outprefix.vcf.gz
+
+#Count the number of filtered variants
+outprefix=${inprefix}_UWGS13K_1e-03_nogt
+bcftools view $outprefix.vcf.gz | grep -v "^#" | wc -l
+
+#Calculate and add Combined Annotation Dependent Depletion (CADD) scores of variants----
+
+#Extract information and import it into a file - CHRO, POS, ID, REF, ALT (needed to CADD score calculation)
+prefix=${inprefix}_UWGS13K_1e-03_nogt
+
+bcftools query -f '%CHROM\t%POS\t%ID\t%REF\t%ALT\n' data/$prefix.vcf.gz | bgzip -c > ${prefix}.txt.gz    #Text file can now be uploaded to CADD for score calculation
+
+#Read CADD score file into R
+cadd = read_tsv(gzfile(paste0("data/", Sys.getenv("inprefix"), "_UWGS13K_1e-03_nogt_cadd-v1.4_anno.tsv.gz")),
+                  skip=1, col_names=TRUE, cols(.default = "c"))                                                  #skip 1 is needed to read the file
+head(cadd)
+
+#Look at the first 3 lines of file downloaded from CADD - explains why skip 1 is needed
+! zcat data/${inprefix}_UWGS13K_1e-03_nogt_cadd-v1.4_anno.tsv.gz | head -3
+
+#Extract only variants in BMPR2
+cadd = filter(cadd, GeneName == "BMPR2")
+head(cadd)
+
+#Count variant types 
+table(cadd$Type)
+
+#Count consequence types 
+cadd %>% select(Consequence) %>% table()
+
+#Count specific type of variant
+cadd %>% select(ConsDetail) %>% table()
+
+#Summarise PHRED score
+summary(as.numeric(cadd$PHRED))
+
+#Plot CADD distributions by consequence typr
+-r 150 -w 8 -h 5 -u in
+
+ggplot(cadd %>% select(PHRED, ConsDetail), 
+        aes(PHRED, color=ConsDetail)) + geom_density()
+
+#Subset consequence types to just protein-coding
+-r 150 -w 8 -h 5 -u in
+
+ggplot(cadd %>% select(PHRED, ConsDetail) %>%
+       filter(grepl("stop|frameshift|splice", ConsDetail)),
+       aes(PHRED, fill=ConsDetail)) + geom_density(alpha=.3)
+
+#Create a new column called var with columns CHROM, POS, REF, ALT combined to one unique string into vars data frame
+vars$var = with(vars, paste0(CHROM, ":", POS, "_", REF,"/", ALT))
+head(vars$var)
+
+#Add selected annotation from CADD data to the vars data frame
+head(select(cadd, var, Consequence, ConsDetail, RawScore, PHRED, 
+            SIFTcat, SIFTval, PolyPhenVal, PolyPhenCat, GerpN))
+            
+#Add the correct AF variable below by replacing "<NAME>" to filter on unrelated controls and add the addtional annotation from the `cadd` data frame.
+vars.flt = left_join(filter(vars, AF_<NAME> < 0.001),
+                     select(cadd, var, Consequence, ConsDetail, RawScore, PHRED,
+                            SIFTcat, SIFTval, PolyPhenVal, PolyPhenCat, GerpN),
+                     by="var")
+vars.flt
+
+#Running Ensembl Variant Effect Predictor (VEP) locally----
+
+#Prepare the file to be used as input for VEP in VCF format
+prefix=${inprefix}_UWGS13K_1e-03_nogt
+outprefix=${prefix}_vep
+
+vep --offline --fork 8 \
+    --input_file data/${prefix}.vcf.gz \
+    --output_file STDOUT --vcf --no_escape \
+    --stats_file ${outprefix}_summary.html \
+    --assembly GRCh37 \
+    --everything --force_overwrite \
+    | bgzip -c > $outprefix.vcf.gz
+tabix -p vcf $outprefix.vcf.gz
+
+#Check whether the VEP files have been generated
+ls -al *_vep*
+
+#Header of VCF file to see additional annotation
+bcftools view -h ${inprefix}_UWGS13K_1e-03_nogt_vep.vcf.gz
+
+
+
+
+
+
+
+
