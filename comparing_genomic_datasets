@@ -1,0 +1,32 @@
+mkdir out
+ls fastq
+bwa index fastq/Homo_sapiens.GRCh38.dna.chromosome.2_15_16.fa.gz
+samtools faidx fastq/Homo_sapiens.GRCh38.dna.chromosome.2_15_16.fa.gz
+
+bwa mem fastq/Homo_sapiens.GRCh38.dna.chromosome.2_15_16.fa.gz fastq/CHS00479_1.fq fastq/CHS00479_2.fq | samtools sort -o out/CHS00479.bam
+samtools index out/CHS00479.bam
+
+bwa mem fastq/Homo_sapiens.GRCh38.dna.chromosome.2_15_16.fa.gz fastq/CHS00501_1.fq fastq/CHS00501_2.fq | samtools sort -o out/CHS00501.bam
+#bwa mem fastq/Homo_sapiens.GRCh38.dna.chromosome.2_15_16.fa.gz fastq/CHS00537_1.fq fastq/CHS00537_2.fq | samtools sort -o out/CHS00537.bam
+bwa mem fastq/Homo_sapiens.GRCh38.dna.chromosome.2_15_16.fa.gz fastq/FIN00304_1.fq fastq/FIN00304_2.fq | samtools sort -o out/FIN00304.bam
+bwa mem fastq/Homo_sapiens.GRCh38.dna.chromosome.2_15_16.fa.gz fastq/GBR00099_1.fq fastq/GBR00099_2.fq | samtools sort -o out/GBR00099.bam
+bwa mem fastq/Homo_sapiens.GRCh38.dna.chromosome.2_15_16.fa.gz fastq/JPT18947_1.fq fastq/JPT18947_2.fq | samtools sort -o out/JPT18947.bam
+
+
+for filename in out/*.bam; do
+	if [ ! -e ${filename%.bam}_filtered.bcf.csi ]; then
+		echo $filename
+		bcftools mpileup -f fastq/Homo_sapiens.GRCh38.dna.chromosome.2_15_16.fa.gz $filename -Ou | bcftools call -mv -Oz -o "${filename%.bam}.bcf"
+		bcftools view -i '%QUAL>=20' "${filename%.bam}.bcf" -Ob -o "${filename%.bam}_filtered.bcf"
+		bcftools index "${filename%.bam}_filtered.bcf"
+		bcftools view "${filename%.bam}_filtered.bcf" > "${filename%.bam}_filtered.vcf"
+	fi
+done
+		
+#Identify variants which are common in two datasets 
+bedtools intersect -a out/FIN00304_filtered.vcf -b out/GBR00099_filtered.vcf -wa -header> intersection_Europe.vcf
+bedtools intersect -a out/CHS00479_filtered.vcf -b out/JPT18947_filtered.vcf -wa -header> intersection_Asia.vcf
+
+#Identify variants found in one dataset but not the other
+bedtools intersect -a intersection_Asia.vcf -b intersection_Europe.vcf -v > Asia_only.vcf
+bedtools intersect -b intersection_Asia.vcf -a intersection_Europe.vcf -v > Europe_only.vcf
